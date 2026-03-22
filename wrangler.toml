@@ -4,10 +4,9 @@ compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
-# Routes — activate once advocate.chitty.cc DNS is provisioned
-# routes = [
-#   { pattern = "advocate.chitty.cc/*", zone_name = "chitty.cc" }
-# ]
+routes = [
+  { pattern = "advocate.chitty.cc/*", zone_name = "chitty.cc" }
+]
 
 # Durable Object — the sputnik agent
 [durable_objects]
