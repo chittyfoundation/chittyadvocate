@@ -27,6 +27,7 @@ export class AdvocateAgent extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.env = env;
     this._initialized = false;
   }
 
@@ -115,7 +116,19 @@ export class AdvocateAgent extends DurableObject {
     const path = url.pathname;
     const method = request.method;
 
-    // Track analytics
+    // CORS preflight
+    if (method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Max-Age": "86400",
+        },
+      });
+    }
+
+    // Track analytics (best-effort)
     this._logAnalytics(path, request);
 
     // --- Health / Discovery ---
@@ -149,39 +162,50 @@ export class AdvocateAgent extends DurableObject {
       const tag = url.searchParams.get("tag");
       return this._jsonResponse(this._listArticles(tag));
     }
-    if (path.startsWith("/articles/")) {
-      const id = path.split("/articles/")[1];
-      return this._getArticle(id);
+    if (path.startsWith("/articles/") && !path.includes("..")) {
+      const id = this._sanitize(path.split("/articles/")[1], 64);
+      if (id) return this._getArticle(id);
     }
 
     // --- Renderings (medium-specific artifact versions) ---
     if (path === "/renderings") {
-      const medium = url.searchParams.get("medium");
-      const artifactId = url.searchParams.get("artifact");
+      const medium = this._sanitize(url.searchParams.get("medium"), 64);
+      const artifactId = this._sanitize(url.searchParams.get("artifact"), 64);
       return this._jsonResponse(this._listRenderings(medium, artifactId));
     }
     if (path === "/renderings/mediums" && method === "GET") {
       return this._jsonResponse(this._listMediums());
     }
     if (method === "POST" && path === "/renderings/generate") {
-      const body = await request.json().catch(() => ({}));
+      const authErr = this._requireWriteAuth(request);
+      if (authErr) return authErr;
+      const body = await this._parseBody(request);
+      if (body._error) return this._jsonResponse({ error: body._error }, 400);
       return this._jsonResponse(this._generateRendering(body));
     }
     if (method === "POST" && path === "/renderings/mediums") {
-      const body = await request.json().catch(() => ({}));
+      const authErr = this._requireWriteAuth(request);
+      if (authErr) return authErr;
+      const body = await this._parseBody(request);
+      if (body._error) return this._jsonResponse({ error: body._error }, 400);
       return this._jsonResponse(this._registerMedium(body));
     }
 
     // --- Distribution Channels ---
     if (method === "POST" && path === "/channels") {
-      const body = await request.json().catch(() => ({}));
+      const authErr = this._requireWriteAuth(request);
+      if (authErr) return authErr;
+      const body = await this._parseBody(request);
+      if (body._error) return this._jsonResponse({ error: body._error }, 400);
       return this._jsonResponse(this._registerChannel(body));
     }
     if (path === "/channels") {
       return this._jsonResponse(this._listChannels());
     }
     if (method === "POST" && path.startsWith("/channels/")) {
-      const channelId = path.split("/channels/")[1];
+      const authErr = this._requireWriteAuth(request);
+      if (authErr) return authErr;
+      const channelId = this._sanitize(path.split("/channels/")[1], 64);
       return this._jsonResponse(await this._distribute(channelId));
     }
 
@@ -190,6 +214,8 @@ export class AdvocateAgent extends DurableObject {
       return this._jsonResponse(this._status());
     }
     if (method === "POST" && path === "/evolve") {
+      const authErr = this._requireWriteAuth(request);
+      if (authErr) return authErr;
       return this._jsonResponse(this._evolve());
     }
     if (path === "/evolve/log") {
@@ -346,6 +372,12 @@ export class AdvocateAgent extends DurableObject {
         `${staleChannels.length} channels haven't distributed in 7+ days`,
       );
     }
+
+    // Prune analytics older than 30 days to prevent unbounded growth
+    this.sql.exec("DELETE FROM analytics WHERE created_at < datetime('now', '-30 days')");
+
+    // Prune evolution log older than 90 days
+    this.sql.exec("DELETE FROM evolution_log WHERE created_at < datetime('now', '-90 days')");
 
     // Sync registry with current articles
     this._syncContentRegistry();
@@ -599,6 +631,13 @@ export class AdvocateAgent extends DurableObject {
       .exec("SELECT * FROM mediums WHERE id = ?", medium)
       .toArray()[0];
 
+    // Limit total renderings
+    const renderingCount = this.sql.exec("SELECT COUNT(*) as c FROM renderings").toArray()[0]?.c || 0;
+    if (renderingCount > 2000) return { error: "Rendering registry full (max 2000)" };
+
+    artifact_id = this._sanitize(String(artifact_id), 64);
+    medium = this._sanitize(String(medium), 64);
+
     const renderingId = `${artifact_id}--${medium}--${Date.now()}`;
     const sections = article.content.sections;
 
@@ -651,19 +690,32 @@ export class AdvocateAgent extends DurableObject {
 
   _registerMedium({ id, name, format, description }) {
     if (!id || !name) return { error: "id and name required" };
+    id = this._sanitize(String(id), 64);
+    name = this._sanitize(String(name), 128);
+    format = this._sanitize(String(format || "markdown"), 32);
+    description = this._sanitize(String(description || ""), 512);
+    // Reject if mediums table is getting too large
     this._ensureMedium(id);
+    const count = this.sql.exec("SELECT COUNT(*) as c FROM mediums").toArray()[0]?.c || 0;
+    if (count > 500) return { error: "Medium registry full (max 500)" };
     this.sql.exec(
       `UPDATE mediums SET name = ?, format = ?, description = ? WHERE id = ?`,
       name,
-      format || "markdown",
-      description || "",
+      format,
+      description,
       id,
     );
-    return { registered: id, name, format: format || "markdown" };
+    return { registered: id, name, format };
   }
 
   _registerChannel({ id, name, type, config }) {
     if (!id || !name || !type) return { error: "id, name, and type required" };
+    id = this._sanitize(String(id), 64);
+    name = this._sanitize(String(name), 128);
+    type = this._sanitize(String(type), 64);
+    // Limit channel count
+    const count = this.sql.exec("SELECT COUNT(*) as c FROM distribution_channels").toArray()[0]?.c || 0;
+    if (count > 500) return { error: "Channel registry full (max 500)" };
     this.sql.exec(
       `INSERT INTO distribution_channels (id, name, type, config)
        VALUES (?, ?, ?, ?)
@@ -944,6 +996,59 @@ function json(data, status = 200) {
   }
 
   // ============================================================================
+  // SECURITY
+  // ============================================================================
+
+  /**
+   * Write operations require a bearer token.
+   * The token is the ADVOCATE_WRITE_TOKEN env var (set via wrangler secret).
+   * Returns a Response on failure, null on success.
+   */
+  _requireWriteAuth(request) {
+    const auth = request.headers.get("authorization") || "";
+    const token = auth.replace(/^Bearer\s+/i, "").trim();
+    // If no write token is configured, allow writes (bootstrap mode)
+    // Once ADVOCATE_WRITE_TOKEN is set, enforcement kicks in
+    if (this.env?.ADVOCATE_WRITE_TOKEN && token !== this.env.ADVOCATE_WRITE_TOKEN) {
+      return this._jsonResponse(
+        { error: "Unauthorized — mutation endpoints require Bearer token" },
+        401,
+      );
+    }
+    return null;
+  }
+
+  /**
+   * Parse and validate request body with size limit.
+   */
+  async _parseBody(request, maxBytes = 64 * 1024) {
+    try {
+      const contentLength = parseInt(request.headers.get("content-length") || "0", 10);
+      if (contentLength > maxBytes) {
+        return { _error: `Body too large (${contentLength} bytes, max ${maxBytes})` };
+      }
+      const text = await request.text();
+      if (text.length > maxBytes) {
+        return { _error: `Body too large (${text.length} chars, max ${maxBytes})` };
+      }
+      return JSON.parse(text);
+    } catch (e) {
+      return { _error: "Invalid JSON body" };
+    }
+  }
+
+  /**
+   * Sanitize string input — strip control chars, HTML tags, enforce max length.
+   */
+  _sanitize(str, maxLen = 256) {
+    if (!str) return str;
+    return str
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")  // control chars
+      .replace(/<[^>]*>/g, "")                                // HTML tags
+      .slice(0, maxLen);
+  }
+
+  // ============================================================================
   // INTERNAL HELPERS
   // ============================================================================
 
@@ -1075,9 +1180,11 @@ function json(data, status = 200) {
     return new Response(JSON.stringify(data, null, 2), {
       status,
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
         "Access-Control-Allow-Origin": "*",
+        "X-Content-Type-Options": "nosniff",
         "X-Sputnik": "chittyadvocate/1.0.0",
+        "Cache-Control": status === 200 ? "public, max-age=60" : "no-store",
       },
     });
   }
