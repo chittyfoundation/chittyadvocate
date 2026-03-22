@@ -1,0 +1,37 @@
+name = "chittyadvocate"
+main = "src/index.js"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+# Routes — activate once advocate.chitty.cc DNS is provisioned
+# routes = [
+#   { pattern = "advocate.chitty.cc/*", zone_name = "chitty.cc" }
+# ]
+
+# Durable Object — the sputnik agent
+[durable_objects]
+bindings = [
+  { name = "ADVOCATE_AGENT", class_name = "AdvocateAgent" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AdvocateAgent"]
+
+# KV for content cache and freshness metadata (Phase 2)
+# [[kv_namespaces]]
+# binding = "CONTENT_CACHE"
+# id = ""  # TODO: create KV namespace
+
+# R2 for static article storage (Phase 2)
+# [[r2_buckets]]
+# binding = "ARTICLES"
+# bucket_name = "chittyadvocate-articles"
+
+[observability]
+enabled = true
+
+# Curation schedule — daily freshness check
+# [triggers]
+# crons = ["0 6 * * *"]
