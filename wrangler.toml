@@ -1,6 +1,6 @@
 name = "chittyadvocate"
 main = "src/index.js"
-compatibility_date = "2025-04-01"
+compatibility_date = "2026-03-16"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
@@ -30,6 +30,9 @@ new_sqlite_classes = ["AdvocateAgent"]
 
 [observability]
 enabled = true
+
+[[tail_consumers]]
+service = "chittytrack"
 
 # Curation schedule — daily freshness check
 # [triggers]
