@@ -27,13 +27,24 @@ new_sqlite_classes = ["AdvocateAgent"]
 # [[r2_buckets]]
 # binding = "ARTICLES"
 # bucket_name = "chittyadvocate-articles"
-
-[observability]
-enabled = true
-
 [[tail_consumers]]
 service = "chittytrack"
 
 # Curation schedule — daily freshness check
 # [triggers]
 # crons = ["0 6 * * *"]
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+destinations = ["chittytrack-logs"]
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1
+destinations = ["chittytrack-traces"]
+persist = false
